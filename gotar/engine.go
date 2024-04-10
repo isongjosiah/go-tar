@@ -1,6 +1,8 @@
 package gotar
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"github.com/isongjosiah/hack/tar/constants"
@@ -9,6 +11,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"unicode"
 )
 
 // TarEngine is an instance that embodies the functionality of tar
@@ -87,19 +91,106 @@ func (gt *TarEngine) Execute() {
 
 	case gt.Flags.ListArchivedContent:
 
-		fileName := gt.Args[len(gt.Args)-1] // if we are listing the content of an archive the file name would be the last
-		file, err := os.Open(fileName)
-		if err != nil {
-			if os.IsNotExist(err) {
-				log.Fatalf("tarball %s does not exist", fileName)
+		// if the f flag is specified
+		if gt.Flags.UseFile {
+
+			fileName := gt.Args[len(gt.Args)-1] // if we are listing the content of an archive the file name would be the last
+			file, err := os.Open(fileName)
+			if err != nil {
+				if os.IsNotExist(err) {
+					log.Fatalf("tarball %s does not exist", fileName)
+				}
+
+				log.Fatalf("there was an error opening file %s: %v", fileName, err)
 			}
 
-			log.Fatalf("there was an error opening file %s: %v", fileName, err)
+			fileHeaders := parseTarFileHeader(file)
+			for _, header := range fileHeaders {
+				fmt.Println(header.Name)
+			}
+
+			return
+
 		}
 
-		fileHeaders := parseTarFileHeader(file)
-		for _, header := range fileHeaders {
-			fmt.Println(header.Name)
+		// otherwise process content from the standard input
+		scanner := bufio.NewScanner(os.Stdin)
+		validated := false
+		for scanner.Scan() {
+
+			// validate that the content is a tarball
+			if !validated {
+
+				sig := scanner.Bytes()
+				validator := bytes.NewReader(sig)
+				version := make([]byte, 6)
+				_, err := validator.ReadAt(version, 257) // offset was obtained from the ustar tar format documentation on wikipedia
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						log.Fatalf("gotar: Error opening archive: Unrecognized archive format")
+					}
+					log.Fatalf("there was an error reading version: %v", err)
+				}
+
+				versionS := strings.TrimSpace(string(version))
+
+				if !strings.Contains(versionS, "ustar") {
+					log.Fatalf("gotar: Error opening archive: Unrecognized archive format")
+				} else {
+					validated = true
+				}
+
+			}
+
+			text := scanner.Text()
+			fName := strings.Split(text, " ")[0]
+			fmt.Println(fName[:len(fName)-6])
+		}
+
+	case gt.Flags.ExtractFromArchive:
+
+		// todo(josiah): handle newline bug
+		// todo: handle input from standard in
+		if gt.Flags.UseFile {
+
+			fileName := gt.Args[len(gt.Args)-1] // if we are listing the content of an archive the file name would be the last
+			file, err := os.Open(fileName)
+			if err != nil {
+				if os.IsNotExist(err) {
+					log.Fatalf("tarball %s does not exist", fileName)
+				}
+
+				log.Fatalf("there was an error opening file %s: %v", fileName, err)
+			}
+
+			fileHeaders := parseTarFileHeader(file)
+
+			var wg sync.WaitGroup
+			for _, header := range fileHeaders {
+
+				wg.Add(1)
+				go func(fHeader TarFileHeader) {
+
+					defer wg.Done()
+					file, err = os.Create(fHeader.Name)
+					if err != nil {
+						fmt.Println("error:", err)
+						log.Printf("gotar: Unable to extract content for %s: failed to create file\n", fHeader.Name)
+						return
+					}
+
+					_, err = file.WriteString(fHeader.Content)
+					if err != nil {
+						log.Printf("gotar: Unable to extract content for %s: failed to write to file\n", fHeader.Name)
+						return
+					}
+
+					log.Println("gotar: Extracted content for ", fHeader.Name)
+
+				}(header)
+
+			}
+			wg.Wait()
 		}
 
 	}
@@ -124,7 +215,13 @@ func read(file *os.File, byteSize int, offset *int) string {
 
 	*offset += byteSize
 
-	return string(b)
+	out := string(b)
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, out)
 
 }
 
@@ -168,7 +265,7 @@ func parseTarFileHeader(file *os.File) []TarFileHeader {
 			Prefix:   read(file, constants.PrefixByteSize, &offSet),
 		}
 
-		offSet += 12 // the header content I parse adds up to 500 bytes - add 12 to complete the block size
+		offSet += 12 // the header content parsed till this point adds up to 500 bytes - add 12 to complete the block size
 
 		size, err := strconv.ParseInt(strings.TrimSpace(tempFile.Size), 8, 64)
 		if err != nil {

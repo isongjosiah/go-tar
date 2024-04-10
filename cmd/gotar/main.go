@@ -14,6 +14,8 @@ func init() {
 
 	// define the flags
 	tarFlags.BoolVar(&tarFlag.ListArchivedContent, "t", false, "list archive contents to stdout.")
+	tarFlags.BoolVar(&tarFlag.UseFile, "f", false, "Read the archive from or write the archive to the specified file")
+	tarFlags.BoolVar(&tarFlag.ExtractFromArchive, "x", false, "Extract to disk from archive")
 
 }
 
